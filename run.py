@@ -2,7 +2,11 @@
 
 import os
 
-from app import create_app
+from dotenv import load_dotenv
+
+load_dotenv()  # before importing app, so Config sees values from .env
+
+from app import create_app  # noqa: E402
 
 app = create_app()
 

@@ -17,7 +17,11 @@ services:
       - "5000:5000"
     environment:
       MONGO_URI: mongodb://mongo:27017/dms
-      SECRET_KEY: triad-ai-dms-change-me-in-production
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env (copy .env.example)}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_DIVISION: ${ADMIN_DIVISION:-Division A}
+      ALLOW_ANONYMOUS_UPLOAD: ${ALLOW_ANONYMOUS_UPLOAD:-0}
       FLASK_DEBUG: "0"
     depends_on:
       mongo:

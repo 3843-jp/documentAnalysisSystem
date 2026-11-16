@@ -31,6 +31,7 @@ Full-stack internship take-home: Flask REST API + MongoDB/GridFS + OCR search + 
 ## Quick start (Docker — recommended)
 
 ```bash
+cp .env.example .env   # then set SECRET_KEY (and ADMIN_PASSWORD if you want an admin)
 docker compose up --build
 ```
 
@@ -63,8 +64,7 @@ sudo apt-get install -y tesseract-ocr
 ### 3. Run API + UI
 
 ```bash
-export MONGO_URI=mongodb://localhost:27017/dms
-export SECRET_KEY=dev-secret
+cp .env.example .env   # run.py loads it; or export the variables yourself
 python run.py
 ```
 
@@ -76,20 +76,25 @@ App: http://localhost:5000
 |--------|----------|--------|
 | POST | `/api/auth/register` | `{username, password, division}` |
 | POST | `/api/auth/login` | returns `{token, user}` |
-| POST | `/api/documents/upload` | multipart: `file` + `metadata` JSON |
+| POST | `/api/documents/upload` | multipart: `file` + `metadata` JSON; token required |
 | GET | `/api/documents` | filter via query params e.g. `?Report Type=Financial` |
 | GET | `/api/documents/<id>/download` | RBAC enforced |
 | POST | `/api/access/request` | `{doc_id}` |
 | POST | `/api/access/approve` | `{request_id}` |
-| GET | `/api/search?q=` | title, metadata, OCR text |
+| GET | `/api/search?q=` | title, metadata, OCR text (OCR text only for documents you can open) |
+| POST/PUT/DELETE | `/api/metadata/fields` | admin only |
 
 Auth header for protected routes: `Authorization: Bearer <token>`
 
-> The starter `test_api.py` posts to `/documents/upload` **without** a token. The API accepts that path for the automated suite; the UI always sends a JWT and forces the uploader’s division.
+Uploads always go into the uploader's division. The original starter `test_api.py` uploaded **without** a token; that is rejected by default. Set `ALLOW_ANONYMOUS_UPLOAD=1` only if you need to run that original script unchanged.
+
+### Admin
+
+Metadata fields (Admin / Settings) can only be changed by an admin. Set `ADMIN_USERNAME` and `ADMIN_PASSWORD` and the account is created on startup (an existing user with that name is promoted).
 
 ## Run the automated tests
 
-With the server running on port 5000:
+`test_api.py` covers auth, upload, division isolation, the access request flow, search and admin-only settings. With the server running on port 5000:
 
 ```bash
 pip install requests
@@ -110,6 +115,9 @@ cat test_report.txt
 | Variable | Default |
 |----------|---------|
 | `MONGO_URI` | `mongodb://localhost:27017/dms` |
-| `SECRET_KEY` | dev fallback (change in production) |
+| `SECRET_KEY` | insecure dev fallback with a warning; **required** by docker compose |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | unset (no admin) |
+| `ADMIN_DIVISION` | `Division A` |
+| `ALLOW_ANONYMOUS_UPLOAD` | `0` |
 | `PORT` | `5000` |
 | `JWT_EXPIRY_HOURS` | `24` |

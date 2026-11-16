@@ -11,12 +11,12 @@ from flask import Blueprint, current_app, g, jsonify, request, send_file
 from app.config import Config
 from app.ocr import extract_text
 from app.utils import (
+    admin_required,
     create_token,
     login_required,
     optional_auth,
     parse_json_field,
     user_can_download_document,
-    user_can_upload_to_division,
 )
 
 api = Blueprint("api", __name__, url_prefix="/api")
@@ -24,6 +24,32 @@ api = Blueprint("api", __name__, url_prefix="/api")
 
 def db():
     return current_app.extensions["db"]
+
+
+def allowed_divisions() -> list[str]:
+    field = db().find_metadata_field_by_name("Division")
+    return (field or {}).get("options") or Config.DEFAULT_DIVISIONS
+
+
+def ocr_search_scope(user: dict, approved_ids: set[str]):
+    """Filter for documents whose OCR text this user may search (None = all)."""
+    if user.get("role") == "admin":
+        return None
+    return {
+        "$or": [
+            {"division": user.get("division")},
+            {"_id": {"$in": [ObjectId(i) for i in approved_ids if ObjectId.is_valid(i)]}},
+        ]
+    }
+
+
+def parse_options(raw):
+    """Validate a metadata options payload; returns (options, error)."""
+    if raw is None:
+        return None, None
+    if not isinstance(raw, list) or not all(isinstance(o, (str, int, float)) for o in raw):
+        return None, "options must be a list of strings"
+    return [str(o) for o in raw], None
 
 
 # ---------------------------------------------------------------------------
@@ -38,12 +64,9 @@ def register():
 
     if not username or not password or not division:
         return jsonify({"error": "username, password, and division are required"}), 400
-    if division not in Config.DEFAULT_DIVISIONS:
-        # Still allow custom divisions that may have been added via metadata options
-        field = db().find_metadata_field_by_name("Division")
-        allowed = (field or {}).get("options") or Config.DEFAULT_DIVISIONS
-        if division not in allowed:
-            return jsonify({"error": f"Invalid division. Allowed: {allowed}"}), 400
+    allowed = allowed_divisions()
+    if division not in allowed:
+        return jsonify({"error": f"Invalid division. Allowed: {allowed}"}), 400
 
     if db().find_user_by_username(username):
         return jsonify({"error": "Username already exists"}), 409
@@ -98,20 +121,22 @@ def upload_document():
     except (json.JSONDecodeError, ValueError) as exc:
         return jsonify({"error": f"Invalid metadata JSON: {exc}"}), 400
 
-    # Division: prefer authenticated user's division; fall back to metadata for tests
+    # Users always upload into their own division. Anonymous upload exists only for the
+    # original starter test suite and must be switched on with ALLOW_ANONYMOUS_UPLOAD.
     if g.user:
         division = g.user["division"]
-        metadata["Division"] = division
         uploaded_by = g.user["sub"]
     else:
+        if not current_app.config.get("ALLOW_ANONYMOUS_UPLOAD"):
+            return jsonify({"error": "Authorization token required"}), 401
         division = metadata.get("Division") or metadata.get("division")
         if not division:
             return jsonify({"error": "Division is required in metadata when unauthenticated"}), 400
-        metadata["Division"] = division
+        if division not in allowed_divisions():
+            return jsonify({"error": f"Invalid division. Allowed: {allowed_divisions()}"}), 400
         uploaded_by = None
-
-    if not user_can_upload_to_division(g.user, division):
-        return jsonify({"error": "You can only upload documents to your own division"}), 403
+    metadata.pop("division", None)
+    metadata["Division"] = division
 
     file_bytes = file.read()
     if not file_bytes:
@@ -148,28 +173,18 @@ def list_documents():
     # Default: show all documents (for discovery + access requests),
     # but annotate access. Optionally narrow with ?mine=1 or division filter.
     docs = db().list_documents(filters)
+    approved = db().request_doc_ids(g.user["sub"], "approved")
+    pending = db().request_doc_ids(g.user["sub"], "pending")
 
     enriched = []
     for doc in docs:
-        raw = db().find_document(doc["id"])
-        can_download = user_can_download_document(g.user, raw, db())
-        same_division = g.user.get("division") == doc.get("division")
-        has_pending = False
-        if not can_download:
-            pending = db().db.access_requests.find_one(
-                {
-                    "doc_id": doc["id"],
-                    "requester_id": g.user["sub"],
-                    "status": "pending",
-                }
-            )
-            has_pending = pending is not None
+        can_download = user_can_download_document(g.user, doc, db(), approved)
         enriched.append(
             {
                 **doc,
                 "can_download": can_download,
-                "same_division": same_division,
-                "access_pending": has_pending,
+                "same_division": g.user.get("division") == doc.get("division"),
+                "access_pending": not can_download and doc["id"] in pending,
             }
         )
     return jsonify({"documents": enriched, "count": len(enriched)}), 200
@@ -311,14 +326,14 @@ def list_access_requests():
 @login_required
 def search():
     q = request.args.get("q", "")
-    results = db().search_documents(q)
+    approved = db().request_doc_ids(g.user["sub"], "approved")
+    results = db().search_documents(q, ocr_scope=ocr_search_scope(g.user, approved))
     enriched = []
     for doc in results:
-        raw = db().find_document(doc["id"])
         enriched.append(
             {
                 **doc,
-                "can_download": user_can_download_document(g.user, raw, db()),
+                "can_download": user_can_download_document(g.user, doc, db(), approved),
                 "same_division": g.user.get("division") == doc.get("division"),
             }
         )
@@ -335,13 +350,15 @@ def list_metadata_fields():
 
 
 @api.post("/metadata/fields")
-@login_required
+@admin_required
 def create_metadata_field():
     data = request.get_json(silent=True) or {}
-    name = (data.get("name") or "").strip()
-    options = data.get("options") or []
+    name = str(data.get("name") or "").strip()
     if not name:
         return jsonify({"error": "name is required"}), 400
+    options, err = parse_options(data.get("options", []))
+    if err:
+        return jsonify({"error": err}), 400
     if db().find_metadata_field_by_name(name):
         return jsonify({"error": "Field already exists"}), 409
     field = db().create_metadata_field(name, options)
@@ -349,33 +366,47 @@ def create_metadata_field():
 
 
 @api.put("/metadata/fields/<field_id>")
-@login_required
+@admin_required
 def update_metadata_field(field_id: str):
+    field = db().find_metadata_field(field_id)
+    if not field:
+        return jsonify({"error": "Field not found"}), 404
+
     data = request.get_json(silent=True) or {}
-    updated = db().update_metadata_field(field_id, data.get("name"), data.get("options"))
+    name = data.get("name")
+    if name is not None:
+        name = str(name).strip()
+        if not name:
+            return jsonify({"error": "name cannot be empty"}), 400
+        if field["name"] == "Division" and name != "Division":
+            return jsonify({"error": "Cannot rename the Division field"}), 400
+        if name != field["name"] and db().find_metadata_field_by_name(name):
+            return jsonify({"error": "Field already exists"}), 409
+    options, err = parse_options(data.get("options"))
+    if err:
+        return jsonify({"error": err}), 400
+
+    updated = db().update_metadata_field(field_id, name, options)
     if not updated:
         return jsonify({"error": "Field not found"}), 404
     return jsonify({"message": "Field updated", "field": updated}), 200
 
 
 @api.delete("/metadata/fields/<field_id>")
-@login_required
+@admin_required
 def delete_metadata_field(field_id: str):
-    # Protect core Division field from accidental deletion
-    fields = {f["id"]: f for f in db().list_metadata_fields()}
-    target = fields.get(field_id)
-    if target and target["name"] == "Division":
-        return jsonify({"error": "Cannot delete the Division field"}), 400
-    if not db().delete_metadata_field(field_id):
+    field = db().find_metadata_field(field_id)
+    if not field:
         return jsonify({"error": "Field not found"}), 404
+    if field["name"] == "Division":
+        return jsonify({"error": "Cannot delete the Division field"}), 400
+    db().delete_metadata_field(field_id)
     return jsonify({"message": "Field deleted"}), 200
 
 
 @api.get("/divisions")
 def list_divisions():
-    field = db().find_metadata_field_by_name("Division")
-    options = (field or {}).get("options") or Config.DEFAULT_DIVISIONS
-    return jsonify({"divisions": options}), 200
+    return jsonify({"divisions": allowed_divisions()}), 200
 
 
 @api.get("/health")

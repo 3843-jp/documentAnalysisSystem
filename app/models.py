@@ -1,5 +1,6 @@
 """MongoDB data access helpers for users, documents, access requests, and metadata fields."""
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -26,8 +27,8 @@ class Database:
     def _ensure_indexes(self) -> None:
         self.db.users.create_index("username", unique=True)
         self.db.documents.create_index([("division", ASCENDING), ("created_at", ASCENDING)])
-        self.db.documents.create_index("ocr_text")
         self.db.access_requests.create_index([("doc_id", ASCENDING), ("requester_id", ASCENDING)])
+        self.db.access_requests.create_index([("requester_id", ASCENDING), ("status", ASCENDING)])
         self.db.metadata_fields.create_index("name", unique=True)
 
     def _seed_defaults(self) -> None:
@@ -61,7 +62,18 @@ class Database:
         return self.db.users.find_one({"username": username.strip()})
 
     def find_user_by_id(self, user_id: str | ObjectId) -> Optional[dict]:
+        if not ObjectId.is_valid(user_id):
+            return None
         return self.db.users.find_one({"_id": ObjectId(user_id)})
+
+    def ensure_admin(self, username: str, password: str, division: str) -> None:
+        """Create the configured admin account, or promote an existing user with that name."""
+        existing = self.find_user_by_username(username)
+        if existing:
+            if existing.get("role") != "admin":
+                self.db.users.update_one({"_id": existing["_id"]}, {"$set": {"role": "admin"}})
+            return
+        self.create_user(username, password, division, role="admin")
 
     def verify_password(self, user: dict, password: str) -> bool:
         return check_password_hash(user["password_hash"], password)
@@ -123,6 +135,8 @@ class Database:
         for key, value in filters.items():
             if value is None or value == "":
                 continue
+            if "$" in key or "\x00" in key:
+                continue  # not a valid metadata field name; avoid Mongo operator paths
             if key == "division":
                 query["division"] = value
             else:
@@ -130,15 +144,25 @@ class Database:
         cursor = self.db.documents.find(query).sort("created_at", -1)
         return [self.serialize_document(doc) for doc in cursor]
 
-    def search_documents(self, query: str) -> list[dict]:
+    def search_documents(self, query: str, ocr_scope: Optional[dict] = None) -> list[dict]:
+        """Case-insensitive literal search over filename, division, metadata and OCR text.
+
+        ``ocr_scope`` is an extra filter limiting which documents may match on their
+        OCR text (so users cannot probe the contents of documents they can't open).
+        ``None`` means no restriction.
+        """
         if not query or not query.strip():
             return []
-        regex = {"$regex": query.strip(), "$options": "i"}
+        pattern = re.escape(query.strip())
+        regex = {"$regex": pattern, "$options": "i"}
+        ocr_clause: dict[str, Any] = {"ocr_text": regex}
+        if ocr_scope is not None:
+            ocr_clause = {"$and": [ocr_clause, ocr_scope]}
         cursor = self.db.documents.find(
             {
                 "$or": [
                     {"filename": regex},
-                    {"ocr_text": regex},
+                    ocr_clause,
                     {"division": regex},
                     {"metadata.Division": regex},
                     {"metadata.Report Type": regex},
@@ -153,7 +177,7 @@ class Database:
                                         "cond": {
                                             "$regexMatch": {
                                                 "input": {"$toString": "$$kv.v"},
-                                                "regex": query.strip(),
+                                                "regex": pattern,
                                                 "options": "i",
                                             }
                                         },
@@ -249,6 +273,12 @@ class Database:
         )
         return found is not None
 
+    def request_doc_ids(self, user_id: str, status: str) -> set[str]:
+        """IDs of documents for which ``user_id`` has an access request in ``status``."""
+        return set(
+            self.db.access_requests.distinct("doc_id", {"requester_id": user_id, "status": status})
+        )
+
     def serialize_access_request(self, req: dict) -> dict:
         doc = self.find_document(req["doc_id"]) if req.get("doc_id") else None
         requester = self.find_user_by_id(req["requester_id"]) if req.get("requester_id") else None
@@ -281,7 +311,14 @@ class Database:
         doc["_id"] = result.inserted_id
         return self.serialize_metadata_field(doc)
 
+    def find_metadata_field(self, field_id: str) -> Optional[dict]:
+        if not ObjectId.is_valid(field_id):
+            return None
+        return self.db.metadata_fields.find_one({"_id": ObjectId(field_id)})
+
     def update_metadata_field(self, field_id: str, name: Optional[str], options: Optional[list]) -> Optional[dict]:
+        if not ObjectId.is_valid(field_id):
+            return None
         updates: dict[str, Any] = {"updated_at": utcnow()}
         if name is not None:
             updates["name"] = name.strip()
@@ -295,6 +332,8 @@ class Database:
         return self.serialize_metadata_field(updated) if updated else None
 
     def delete_metadata_field(self, field_id: str) -> bool:
+        if not ObjectId.is_valid(field_id):
+            return False
         result = self.db.metadata_fields.delete_one({"_id": ObjectId(field_id)})
         return result.deleted_count > 0
 

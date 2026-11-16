@@ -69,28 +69,33 @@ def optional_auth(fn):
     return wrapper
 
 
-def user_can_view_document(user: Optional[dict], document: dict, db) -> bool:
+def admin_required(fn):
+    @login_required
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if g.user.get("role") != "admin":
+            return jsonify({"error": "Admin access required"}), 403
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def user_can_download_document(
+    user: Optional[dict], document: dict, db, approved_ids: Optional[set] = None
+) -> bool:
+    """Same division, admin, or an approved access request.
+
+    ``document`` may be a raw Mongo doc (``_id``) or a serialized one (``id``).
+    Pass ``approved_ids`` (from ``db.request_doc_ids``) to avoid a query per document.
+    """
     if not user:
         return False
-    if user.get("division") == document.get("division"):
+    if user.get("division") == document.get("division") or user.get("role") == "admin":
         return True
-    if user.get("role") == "admin":
-        return True
-    return db.has_approved_access(str(document["_id"]), user.get("sub"))
-
-
-def user_can_download_document(user: Optional[dict], document: dict, db) -> bool:
-    return user_can_view_document(user, document, db)
-
-
-def user_can_upload_to_division(user: Optional[dict], division: str) -> bool:
-    if not user:
-        # Allow unauthenticated upload for automated starter tests;
-        # production UIs always send a token.
-        return True
-    if user.get("role") == "admin":
-        return True
-    return user.get("division") == division
+    doc_id = str(document.get("_id") or document.get("id"))
+    if approved_ids is not None:
+        return doc_id in approved_ids
+    return db.has_approved_access(doc_id, user.get("sub"))
 
 
 def parse_json_field(raw: Any) -> dict:

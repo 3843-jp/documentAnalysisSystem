@@ -58,6 +58,11 @@ function showApp() {
   $("#view-app").classList.remove("hidden");
   $("#user-chip").textContent = `${state.user.username} · ${state.user.division}`;
   $("#upload-division").textContent = state.user.division;
+  $('.nav a[data-nav="settings"]').classList.toggle("hidden", !isAdmin());
+}
+
+function isAdmin() {
+  return state.user?.role === "admin";
 }
 
 function route() {
@@ -69,6 +74,11 @@ function route() {
     return;
   }
   showApp();
+
+  if (path === "settings" && !isAdmin()) {
+    location.hash = "#/dashboard";
+    return;
+  }
 
   $$(".page").forEach((p) => p.classList.add("hidden"));
   $$(".nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === path));
