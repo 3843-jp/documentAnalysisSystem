@@ -1,5 +1,0 @@
-=== BACKEND API TEST REPORT ===
-Total Endpoints Tested: 1
-Passed: 1
-Failed: 0
-
