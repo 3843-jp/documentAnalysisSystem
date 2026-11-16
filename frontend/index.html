@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Triad DMS — Document Management</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Auth -->
+    <section id="view-auth" class="view auth-view hidden">
+      <div class="auth-shell">
+        <div class="auth-brand">
+          <p class="eyebrow">Triad AI</p>
+          <h1>Document Management System</h1>
+          <p class="lede">Secure division-isolated documents with dynamic metadata, access requests, and OCR search.</p>
+        </div>
+        <div class="auth-panel">
+          <div class="tabs">
+            <button type="button" class="tab active" data-auth-tab="login">Login</button>
+            <button type="button" class="tab" data-auth-tab="signup">Sign up</button>
+          </div>
+          <form id="login-form" class="stack">
+            <label>Username<input name="username" required autocomplete="username" /></label>
+            <label>Password<input name="password" type="password" required autocomplete="current-password" /></label>
+            <button type="submit" class="btn primary">Sign in</button>
+          </form>
+          <form id="signup-form" class="stack hidden">
+            <label>Username<input name="username" required autocomplete="username" /></label>
+            <label>Password<input name="password" type="password" required minlength="4" autocomplete="new-password" /></label>
+            <label>Division
+              <select name="division" id="signup-division" required></select>
+            </label>
+            <button type="submit" class="btn primary">Create account</button>
+          </form>
+          <p id="auth-error" class="error" hidden></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- App shell -->
+    <section id="view-app" class="view app-view hidden">
+      <aside class="sidebar">
+        <div class="brand-block">
+          <span class="brand-mark">T</span>
+          <div>
+            <strong>Triad DMS</strong>
+            <small id="user-chip">—</small>
+          </div>
+        </div>
+        <nav class="nav">
+          <a href="#/dashboard" data-nav="dashboard">Documents</a>
+          <a href="#/search" data-nav="search">Search</a>
+          <a href="#/requests" data-nav="requests">Access Inbox</a>
+          <a href="#/settings" data-nav="settings">Admin / Settings</a>
+        </nav>
+        <button type="button" id="logout-btn" class="btn ghost logout">Log out</button>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <h2 id="page-title">Documents</h2>
+          <button type="button" id="open-upload" class="btn primary">Upload Document</button>
+        </header>
+
+        <!-- Dashboard -->
+        <div id="page-dashboard" class="page">
+          <div class="filters" id="dashboard-filters"></div>
+          <div id="documents-list" class="doc-grid"></div>
+          <p id="documents-empty" class="empty hidden">No documents match these filters.</p>
+        </div>
+
+        <!-- Document detail -->
+        <div id="page-detail" class="page hidden">
+          <button type="button" class="btn ghost" id="back-to-docs">← Back</button>
+          <article id="detail-card" class="detail-card"></article>
+        </div>
+
+        <!-- Search -->
+        <div id="page-search" class="page hidden">
+          <form id="search-form" class="search-bar">
+            <input name="q" placeholder="Search titles, metadata, and OCR text…" required />
+            <button type="submit" class="btn primary">Search</button>
+          </form>
+          <div id="search-results" class="doc-grid"></div>
+          <p id="search-empty" class="empty hidden">No results.</p>
+        </div>
+
+        <!-- Access requests -->
+        <div id="page-requests" class="page hidden">
+          <div class="split">
+            <section>
+              <h3>Incoming (your division)</h3>
+              <div id="incoming-requests" class="request-list"></div>
+            </section>
+            <section>
+              <h3>Your outgoing requests</h3>
+              <div id="outgoing-requests" class="request-list"></div>
+            </section>
+          </div>
+        </div>
+
+        <!-- Settings -->
+        <div id="page-settings" class="page hidden">
+          <p class="hint">Manage dynamic metadata fields used for filtering and tagging. Changes apply to future uploads without code changes.</p>
+          <form id="field-form" class="inline-form">
+            <input name="name" placeholder="Field name (e.g. Region)" required />
+            <input name="options" placeholder="Options comma-separated" />
+            <button type="submit" class="btn primary">Add field</button>
+          </form>
+          <div id="fields-list" class="fields-list"></div>
+        </div>
+      </main>
+    </section>
+  </div>
+
+  <!-- Upload modal -->
+  <dialog id="upload-dialog">
+    <form id="upload-form" method="dialog" class="stack">
+      <h3>Upload Document</h3>
+      <p class="hint">File is stored in your division: <strong id="upload-division"></strong></p>
+      <label>File<input type="file" name="file" accept=".pdf,image/*" required /></label>
+      <div id="upload-metadata-fields" class="stack"></div>
+      <div class="row">
+        <button type="button" class="btn ghost" id="cancel-upload">Cancel</button>
+        <button type="submit" class="btn primary">Upload</button>
+      </div>
+      <p id="upload-error" class="error" hidden></p>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

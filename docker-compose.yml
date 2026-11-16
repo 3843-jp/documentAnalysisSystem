@@ -1,0 +1,27 @@
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      MONGO_URI: mongodb://mongo:27017/dms
+      SECRET_KEY: triad-ai-dms-change-me-in-production
+      FLASK_DEBUG: "0"
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+volumes:
+  mongo_data:
