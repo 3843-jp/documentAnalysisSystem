@@ -11,6 +11,7 @@ from flask import Blueprint, current_app, g, jsonify, request, send_file
 from app.config import Config
 from app.ocr import extract_text
 from app.utils import (
+    admin_required,
     create_token,
     login_required,
     optional_auth,
@@ -98,20 +99,28 @@ def upload_document():
     except (json.JSONDecodeError, ValueError) as exc:
         return jsonify({"error": f"Invalid metadata JSON: {exc}"}), 400
 
-    # Division: prefer authenticated user's division; fall back to metadata for tests
+    if not isinstance(metadata, dict):
+        return jsonify({"error": "metadata must be a JSON object"}), 400
+
+    requested = metadata.get("Division") or metadata.get("division")
+    metadata.pop("division", None)
+
     if g.user:
-        division = g.user["division"]
-        metadata["Division"] = division
+        # RBAC: users upload only to their own division (admins may choose one)
+        division = requested or g.user["division"]
+        if not user_can_upload_to_division(g.user, division):
+            return jsonify({"error": "You can only upload documents to your own division"}), 403
         uploaded_by = g.user["sub"]
     else:
-        division = metadata.get("Division") or metadata.get("division")
+        # Anonymous upload exists only for the starter test script; it can be
+        # switched off with ALLOW_ANONYMOUS_UPLOAD=false.
+        if not getattr(Config, "ALLOW_ANONYMOUS_UPLOAD", True):
+            return jsonify({"error": "Authentication required"}), 401
+        division = requested
         if not division:
             return jsonify({"error": "Division is required in metadata when unauthenticated"}), 400
-        metadata["Division"] = division
         uploaded_by = None
-
-    if not user_can_upload_to_division(g.user, division):
-        return jsonify({"error": "You can only upload documents to your own division"}), 403
+    metadata["Division"] = division
 
     file_bytes = file.read()
     if not file_bytes:
@@ -145,9 +154,9 @@ def list_documents():
             continue
         filters[key] = value
 
-    # Default: show all documents (for discovery + access requests),
-    # but annotate access. Optionally narrow with ?mine=1 or division filter.
-    docs = db().list_documents(filters)
+    # Default scope: own division + approved docs. ?Division=X browses another
+    # division (metadata only) so users can find documents to request.
+    docs = db().list_documents(filters, g.user)
 
     enriched = []
     for doc in docs:
@@ -311,7 +320,7 @@ def list_access_requests():
 @login_required
 def search():
     q = request.args.get("q", "")
-    results = db().search_documents(q)
+    results = db().search_documents(q, g.user)
     enriched = []
     for doc in results:
         raw = db().find_document(doc["id"])
@@ -335,7 +344,7 @@ def list_metadata_fields():
 
 
 @api.post("/metadata/fields")
-@login_required
+@admin_required
 def create_metadata_field():
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
@@ -349,7 +358,7 @@ def create_metadata_field():
 
 
 @api.put("/metadata/fields/<field_id>")
-@login_required
+@admin_required
 def update_metadata_field(field_id: str):
     data = request.get_json(silent=True) or {}
     updated = db().update_metadata_field(field_id, data.get("name"), data.get("options"))
@@ -359,7 +368,7 @@ def update_metadata_field(field_id: str):
 
 
 @api.delete("/metadata/fields/<field_id>")
-@login_required
+@admin_required
 def delete_metadata_field(field_id: str):
     # Protect core Division field from accidental deletion
     fields = {f["id"]: f for f in db().list_metadata_fields()}
