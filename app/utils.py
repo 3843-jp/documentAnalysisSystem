@@ -53,6 +53,19 @@ def login_required(fn):
     return wrapper
 
 
+def admin_required(fn):
+    """Login + admin role required (used for metadata/settings management)."""
+
+    @wraps(fn)
+    @login_required
+    def wrapper(*args, **kwargs):
+        if g.user.get("role") != "admin":
+            return jsonify({"error": "Admin privileges required"}), 403
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
 def optional_auth(fn):
     """Attach g.user when a valid token is present; otherwise leave g.user as None."""
 
