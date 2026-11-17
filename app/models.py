@@ -1,6 +1,6 @@
-
 """MongoDB data access helpers for users, documents, access requests, and metadata fields."""
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -38,7 +38,6 @@ class Database:
         self.db.documents.create_index(
             [("division", ASCENDING), ("created_at", ASCENDING)]
         )
-        self.db.documents.create_index("ocr_text")
 
         self.db.access_requests.create_index(
             [("doc_id", ASCENDING), ("requester_id", ASCENDING)]
@@ -47,6 +46,15 @@ class Database:
         self.db.metadata_fields.create_index("name", unique=True)
 
     def _seed_defaults(self) -> None:
+        # Default admin (can manage metadata fields and approve any request)
+        admin_username = getattr(Config, "ADMIN_USERNAME", "admin")
+        if not self.db.users.find_one({"username": admin_username}):
+            self.create_user(
+                admin_username,
+                getattr(Config, "ADMIN_PASSWORD", "admin123"),
+                getattr(Config, "ADMIN_DIVISION", "Division A"),
+                role="admin",
+            )
         for field in Config.DEFAULT_METADATA_FIELDS:
             self.db.metadata_fields.update_one(
                 {"name": field["name"]},
@@ -158,68 +166,88 @@ class Database:
 
         return self.db.documents.find_one({"_id": ObjectId(doc_id)})
 
-    def list_documents(self, filters: Optional[dict] = None) -> list[dict]:
-        query: dict[str, Any] = {}
-        filters = filters or {}
+    def approved_doc_ids(self, user_id) -> list:
+        """Documents the user was granted cross-division access to."""
+        ids = self.db.access_requests.distinct(
+            "doc_id", {"requester_id": user_id, "status": "approved"}
+        )
+        return [ObjectId(i) for i in ids if ObjectId.is_valid(i)]
 
-        for key, value in filters.items():
+    def list_documents(self, filters: Optional[dict] = None, user: Optional[dict] = None) -> list[dict]:
+        """RBAC-scoped listing.
+
+        Default = own division + documents the user was approved for.
+        ?Division=X browses another division (metadata only; download is still
+        gated). Admins see every division by default.
+        """
+        query: dict[str, Any] = {}
+        division_filter = None
+        for key, value in (filters or {}).items():
             if value is None or value == "":
                 continue
-
-            if key == "division":
-                query["division"] = value
+            if key.lower() == "division":
+                division_filter = value
             else:
                 query[f"metadata.{key}"] = value
 
-        cursor = self.db.documents.find(query).sort("created_at", -1)
+        if division_filter:
+            query["division"] = division_filter
+        elif user and user.get("role") != "admin":
+            query["$or"] = [
+                {"division": user.get("division")},
+                {"_id": {"$in": self.approved_doc_ids(user.get("sub"))}},
+            ]
 
+        cursor = self.db.documents.find(query).sort("created_at", -1)
         return [self.serialize_document(doc) for doc in cursor]
 
-    def search_documents(self, query: str) -> list[dict]:
+    def search_documents(self, query: str, user: Optional[dict] = None) -> list[dict]:
+        """Title + metadata are searchable across divisions (so users can find
+        documents to request); OCR text only for documents the user can read."""
         if not query or not query.strip():
             return []
+        term = re.escape(query.strip())
+        regex = {"$regex": term, "$options": "i"}
 
-        search_term = query.strip()
-        regex = {"$regex": search_term, "$options": "i"}
-
-        cursor = self.db.documents.find(
+        meta_conditions = [
+            {"filename": regex},
+            {"division": regex},
             {
-                "$or": [
-                    {"filename": regex},
-                    {"ocr_text": regex},
-                    {"division": regex},
-                    {"metadata.Division": regex},
-                    {"metadata.Report Type": regex},
-                    {
-                        "$expr": {
-                            "$gt": [
-                                {
-                                    "$size": {
-                                        "$filter": {
-                                            "input": {
-                                                "$objectToArray": {
-                                                    "$ifNull": ["$metadata", {}]
-                                                }
-                                            },
-                                            "as": "kv",
-                                            "cond": {
-                                                "$regexMatch": {
-                                                    "input": {"$toString": "$$kv.v"},
-                                                    "regex": search_term,
-                                                    "options": "i",
-                                                }
-                                            },
+                "$expr": {
+                    "$gt": [
+                        {
+                            "$size": {
+                                "$filter": {
+                                    "input": {"$objectToArray": {"$ifNull": ["$metadata", {}]}},
+                                    "as": "kv",
+                                    "cond": {
+                                        "$regexMatch": {
+                                            "input": {"$toString": "$$kv.v"},
+                                            "regex": term,
+                                            "options": "i",
                                         }
-                                    }
-                                },
-                                0,
-                            ]
-                        }
-                    },
-                ]
-            }
-        ).sort("created_at", -1)
+                                    },
+                                }
+                            }
+                        },
+                        0,
+                    ]
+                }
+            },
+        ]
 
+        if user and user.get("role") == "admin":
+            ocr_condition: dict[str, Any] = {"ocr_text": regex}
+        else:
+            ocr_condition = {
+                "ocr_text": regex,
+                "$or": [
+                    {"division": (user or {}).get("division")},
+                    {"_id": {"$in": self.approved_doc_ids((user or {}).get("sub"))}},
+                ],
+            }
+
+        cursor = self.db.documents.find({"$or": meta_conditions + [ocr_condition]}).sort("created_at", -1)
         return [self.serialize_document(doc) for doc in cursor]
 
     @staticmethod
@@ -437,6 +465,14 @@ class Database:
 
         return result.deleted_count > 0
 
+    @staticmethod
+    def serialize_metadata_field(field: dict) -> dict:
+        return {
+            "id": str(field["_id"]),
+            "name": field["name"],
+            "options": field.get("options") or [],
+            "created_at": field.get("created_at").isoformat() if field.get("created_at") else None,
+        }
+
     def find_metadata_field_by_name(self, name: str) -> Optional[dict]:
         return self.db.metadata_fields.find_one({"name": name})
-
